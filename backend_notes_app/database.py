@@ -11,8 +11,9 @@ env_db_path = os.getenv("NOTES_APP_DB_PATH")
 DB_PATH = Path(env_db_path).resolve() if env_db_path else (BASE_DIR / "notes.db").resolve()
 LEGACY_DB_PATH = (BASE_DIR.parent / "notes.db").resolve()
 
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
 if not DB_PATH.exists() and LEGACY_DB_PATH.exists():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(LEGACY_DB_PATH, DB_PATH)
 
 SQLALCHEMY_DATABASE_URL = f"sqlite:///{DB_PATH.as_posix()}"
@@ -30,10 +31,17 @@ Base = declarative_base()
 
 
 def ensure_fts(engine) -> None:
+    if os.getenv("NOTES_APP_DISABLE_FTS"):
+        return
+
+    force_rebuild = bool(os.getenv("NOTES_APP_FORCE_FTS_REBUILD"))
+    skip_rebuild = bool(os.getenv("NOTES_APP_SKIP_FTS_REBUILD")) and not force_rebuild
+
     with engine.begin() as conn:
         existing_sql = conn.execute(
             text("SELECT sql FROM sqlite_master WHERE type='table' AND name='notes_fts'")
         ).scalar()
+        notes_need_rebuild = force_rebuild or existing_sql is None
 
         if existing_sql and (
             "create virtual table" not in existing_sql.lower()
@@ -43,6 +51,7 @@ def ensure_fts(engine) -> None:
             conn.execute(text("DROP TRIGGER IF EXISTS notes_ad"))
             conn.execute(text("DROP TRIGGER IF EXISTS notes_au"))
             conn.execute(text("DROP TABLE IF EXISTS notes_fts"))
+            notes_need_rebuild = True
 
         conn.execute(
             text(
@@ -87,11 +96,13 @@ def ensure_fts(engine) -> None:
             )
         )
 
-        conn.execute(text("INSERT INTO notes_fts(notes_fts) VALUES('rebuild');"))
+        if notes_need_rebuild and not skip_rebuild:
+            conn.execute(text("INSERT INTO notes_fts(notes_fts) VALUES('rebuild');"))
 
         folders_existing_sql = conn.execute(
             text("SELECT sql FROM sqlite_master WHERE type='table' AND name='folders_fts'")
         ).scalar()
+        folders_need_rebuild = force_rebuild or folders_existing_sql is None
 
         if folders_existing_sql and (
             "create virtual table" not in folders_existing_sql.lower()
@@ -101,6 +112,7 @@ def ensure_fts(engine) -> None:
             conn.execute(text("DROP TRIGGER IF EXISTS folders_ad"))
             conn.execute(text("DROP TRIGGER IF EXISTS folders_au"))
             conn.execute(text("DROP TABLE IF EXISTS folders_fts"))
+            folders_need_rebuild = True
 
         conn.execute(
             text(
@@ -142,7 +154,9 @@ def ensure_fts(engine) -> None:
                 """
             )
         )
-        conn.execute(text("INSERT INTO folders_fts(folders_fts) VALUES('rebuild');"))
+
+        if folders_need_rebuild and not skip_rebuild:
+            conn.execute(text("INSERT INTO folders_fts(folders_fts) VALUES('rebuild');"))
 
 
 def ensure_notes_columns(engine) -> None:

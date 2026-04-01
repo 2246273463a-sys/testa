@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import logging
 from logging.handlers import RotatingFileHandler
+import os
 
 
 def configure_logging(log_level: str = "INFO") -> None:
@@ -27,15 +28,14 @@ def configure_logging(log_level: str = "INFO") -> None:
     stream_handler.setLevel(level)
     stream_handler.setFormatter(formatter)
 
-    file_handler = RotatingFileHandler(
-        log_file,
-        maxBytes=10 * 1024 * 1024,
-        backupCount=5,
-        encoding="utf-8",
-    )
-    file_handler.setLevel(level)
-    file_handler.setFormatter(formatter)
-
     root.addHandler(stream_handler)
-    root.addHandler(file_handler)
-
+    if not os.getenv("NOTES_APP_DISABLE_FILE_LOG"):
+        file_handler = RotatingFileHandler(
+            log_file,
+            maxBytes=10 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)

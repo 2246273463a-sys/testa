@@ -3,12 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import FileResponse
+from starlette.staticfiles import StaticFiles
 from uuid import uuid4
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text, or_, func
 import logging
 import time
 import os
+from pathlib import Path
 from . import models, schemas
 from .database import engine, SessionLocal, Base, ensure_fts, ensure_notes_columns, ensure_todos_columns
 from .logging_config import configure_logging
@@ -16,18 +19,39 @@ from .logging_config import configure_logging
 configure_logging()
 logger = logging.getLogger("notes_app")
 
-app = FastAPI(title="Python Notes App Backend")
+api_app = FastAPI(title="Python Notes App Backend")
+app = FastAPI(title="Python Notes App", docs_url=None, redoc_url=None, openapi_url=None)
+app.mount("/api", api_app)
 
 default_allow_origin_regex = r"^https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$"
 allow_origin_regex = os.getenv("NOTES_APP_ALLOW_ORIGIN_REGEX") or default_allow_origin_regex
 
-app.add_middleware(
+api_app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=allow_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _resolve_frontend_dist() -> Path | None:
+    if os.getenv("NOTES_APP_DISABLE_FRONTEND"):
+        return None
+    env = os.getenv("NOTES_APP_FRONTEND_DIST")
+    if env:
+        p = Path(env).expanduser().resolve()
+        return p if p.exists() else None
+    p = (Path(__file__).resolve().parent.parent / "frontend_notes_app" / "build").resolve()
+    return p if p.exists() else None
+
+
+frontend_dist = _resolve_frontend_dist()
+if frontend_dist is not None:
+    app.state.frontend_index_path = str((frontend_dist / "index.html").resolve())
+    app.mount("/", StaticFiles(directory=str(frontend_dist), html=True), name="frontend")
+else:
+    app.state.frontend_index_path = None
 
 
 @app.on_event("startup")
@@ -77,7 +101,30 @@ async def log_requests(request, call_next):
     return response
 
 
-@app.exception_handler(RequestValidationError)
+class SpaFallbackMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        if response.status_code != 404:
+            return response
+        if request.method != "GET":
+            return response
+        if request.url.path.startswith("/api"):
+            return response
+        index = getattr(request.app.state, "frontend_index_path", None)
+        if not index:
+            return response
+        if "." in Path(request.url.path).name:
+            return response
+        p = Path(index)
+        if not p.exists():
+            return response
+        return FileResponse(p)
+
+
+app.add_middleware(SpaFallbackMiddleware)
+
+
+@api_app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc: RequestValidationError):
     logger.warning(
         "参数校验失败 请求ID=%s 路径=%s 详情=%s",
@@ -95,7 +142,7 @@ async def validation_exception_handler(request, exc: RequestValidationError):
     )
 
 
-@app.exception_handler(HTTPException)
+@api_app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc: HTTPException):
     logger.warning(
         "业务异常 请求ID=%s 路径=%s 状态码=%s 详情=%s",
@@ -110,7 +157,7 @@ async def http_exception_handler(request, exc: HTTPException):
     )
 
 
-@app.exception_handler(Exception)
+@api_app.exception_handler(Exception)
 async def unhandled_exception_handler(request, exc: Exception):
     logger.exception(
         "未捕获异常 请求ID=%s 路径=%s",
@@ -179,7 +226,7 @@ def write_op_log(db: Session, entity_type: str, entity_id: int, action: str, det
     )
     db.commit()
 
-@app.post("/folders", response_model=schemas.Folder, tags=["Folders"])
+@api_app.post("/folders", response_model=schemas.Folder, tags=["Folders"])
 def create_folder(folder: schemas.FolderCreate, db: Session = Depends(get_db)):
     db_folder = models.Folder(**folder.dict())
     db.add(db_folder)
@@ -188,7 +235,7 @@ def create_folder(folder: schemas.FolderCreate, db: Session = Depends(get_db)):
     write_op_log(db, "folder", db_folder.id, "create", detail=db_folder.name)
     return db_folder
 
-@app.get("/folders", response_model=List[schemas.Folder], tags=["Folders"])
+@api_app.get("/folders", response_model=List[schemas.Folder], tags=["Folders"])
 def read_folders(db: Session = Depends(get_db)):
     folders = (
         db.query(models.Folder)
@@ -199,7 +246,7 @@ def read_folders(db: Session = Depends(get_db)):
     # 根文件夹是 parent_id 为 None 的文件夹
     return build_folder_tree(folders, parent_id=None)
 
-@app.get("/folders/{folder_id}", response_model=schemas.Folder, tags=["Folders"])
+@api_app.get("/folders/{folder_id}", response_model=schemas.Folder, tags=["Folders"])
 def read_folder(folder_id: int, db: Session = Depends(get_db)):
     folder = (
         db.query(models.Folder)
@@ -219,7 +266,7 @@ def read_folder(folder_id: int, db: Session = Depends(get_db)):
     
     return folder_schema
 
-@app.put("/folders/{folder_id}", response_model=schemas.Folder, tags=["Folders"])
+@api_app.put("/folders/{folder_id}", response_model=schemas.Folder, tags=["Folders"])
 def update_folder(folder_id: int, folder: schemas.FolderUpdate, db: Session = Depends(get_db)):
     db_folder = db.query(models.Folder).filter(models.Folder.id == folder_id).first()
     if db_folder is None:
@@ -247,7 +294,7 @@ def update_folder(folder_id: int, folder: schemas.FolderUpdate, db: Session = De
     write_op_log(db, "folder", db_folder.id, "update", detail=str(updates) if updates else None)
     return db_folder
 
-@app.delete("/folders/{folder_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Folders"])
+@api_app.delete("/folders/{folder_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Folders"])
 def delete_folder(folder_id: int, db: Session = Depends(get_db)):
     db_folder = db.query(models.Folder).filter(models.Folder.id == folder_id).first()
     if db_folder is None:
@@ -259,7 +306,7 @@ def delete_folder(folder_id: int, db: Session = Depends(get_db)):
     write_op_log(db, "folder", folder_id, "delete", detail=folder_name)
     return
 
-@app.post("/notes", response_model=schemas.Note, tags=["Notes"])
+@api_app.post("/notes", response_model=schemas.Note, tags=["Notes"])
 def create_note(note: schemas.NoteCreate, db: Session = Depends(get_db)):
     folder_id = note.folder_id
     if folder_id is None:
@@ -281,7 +328,7 @@ def create_note(note: schemas.NoteCreate, db: Session = Depends(get_db)):
     write_op_log(db, "note", db_note.id, "create", detail=db_note.title)
     return db_note
 
-@app.get("/notes", response_model=List[schemas.Note], tags=["Notes"])
+@api_app.get("/notes", response_model=List[schemas.Note], tags=["Notes"])
 def read_notes(
     folder_id: Optional[int] = None,
     include_deleted: bool = False,
@@ -310,14 +357,14 @@ def read_notes(
     notes = query.order_by(models.Note.is_pinned.desc(), models.Note.updated_at.desc(), models.Note.created_at.desc()).all()
     return notes
 
-@app.get("/notes/{note_id}", response_model=schemas.Note, tags=["Notes"])
+@api_app.get("/notes/{note_id}", response_model=schemas.Note, tags=["Notes"])
 def read_note(note_id: int, db: Session = Depends(get_db)):
     note = db.query(models.Note).options(joinedload(models.Note.tags)).filter(models.Note.id == note_id).first()
     if note is None:
         raise HTTPException(status_code=404, detail="Note not found")
     return note
 
-@app.put("/notes/{note_id}", response_model=schemas.Note, tags=["Notes"])
+@api_app.put("/notes/{note_id}", response_model=schemas.Note, tags=["Notes"])
 def update_note(note_id: int, note: schemas.NoteUpdate, db: Session = Depends(get_db)):
     db_note = db.query(models.Note).filter(models.Note.id == note_id).first()
     if db_note is None:
@@ -350,7 +397,7 @@ def update_note(note_id: int, note: schemas.NoteUpdate, db: Session = Depends(ge
     return db_note
 
 
-@app.post("/notes/bulk", response_model=List[schemas.Note], tags=["Notes"])
+@api_app.post("/notes/bulk", response_model=List[schemas.Note], tags=["Notes"])
 def bulk_notes(payload: schemas.NoteBulkAction, db: Session = Depends(get_db)):
     ids = [int(x) for x in (payload.ids or []) if x is not None]
     if not ids:
@@ -422,13 +469,13 @@ def bulk_notes(payload: schemas.NoteBulkAction, db: Session = Depends(get_db)):
     return notes
 
 
-@app.get("/tags", response_model=List[schemas.Tag], tags=["Tags"])
+@api_app.get("/tags", response_model=List[schemas.Tag], tags=["Tags"])
 def list_tags(db: Session = Depends(get_db)):
     tags = db.query(models.Tag).order_by(models.Tag.name).all()
     return tags
 
 
-@app.post("/tags", response_model=schemas.Tag, tags=["Tags"])
+@api_app.post("/tags", response_model=schemas.Tag, tags=["Tags"])
 def create_tag(tag: schemas.TagCreate, db: Session = Depends(get_db)):
     exists = db.query(models.Tag).filter(models.Tag.name == tag.name).first()
     if exists is not None:
@@ -441,7 +488,7 @@ def create_tag(tag: schemas.TagCreate, db: Session = Depends(get_db)):
     return db_tag
 
 
-@app.put("/tags/{tag_id}", response_model=schemas.Tag, tags=["Tags"])
+@api_app.put("/tags/{tag_id}", response_model=schemas.Tag, tags=["Tags"])
 def update_tag(tag_id: int, tag: schemas.TagUpdate, db: Session = Depends(get_db)):
     db_tag = db.query(models.Tag).filter(models.Tag.id == tag_id).first()
     if db_tag is None:
@@ -459,7 +506,7 @@ def update_tag(tag_id: int, tag: schemas.TagUpdate, db: Session = Depends(get_db
     return db_tag
 
 
-@app.delete("/tags/{tag_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Tags"])
+@api_app.delete("/tags/{tag_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Tags"])
 def delete_tag(tag_id: int, db: Session = Depends(get_db)):
     db_tag = db.query(models.Tag).filter(models.Tag.id == tag_id).first()
     if db_tag is None:
@@ -470,7 +517,7 @@ def delete_tag(tag_id: int, db: Session = Depends(get_db)):
     write_op_log(db, "tag", tag_id, "delete", detail=tag_name)
     return
 
-@app.delete("/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Notes"])
+@api_app.delete("/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Notes"])
 def delete_note(note_id: int, db: Session = Depends(get_db)):
     db_note = db.query(models.Note).filter(models.Note.id == note_id).first()
     if db_note is None:
@@ -487,7 +534,7 @@ def delete_note(note_id: int, db: Session = Depends(get_db)):
     return
 
 
-@app.post("/notes/{note_id}/restore", response_model=schemas.Note, tags=["Notes"])
+@api_app.post("/notes/{note_id}/restore", response_model=schemas.Note, tags=["Notes"])
 def restore_note(note_id: int, db: Session = Depends(get_db)):
     db_note = db.query(models.Note).filter(models.Note.id == note_id).first()
     if db_note is None:
@@ -500,7 +547,7 @@ def restore_note(note_id: int, db: Session = Depends(get_db)):
     return db_note
 
 
-@app.delete("/notes/{note_id}/hard", status_code=status.HTTP_204_NO_CONTENT, tags=["Notes"])
+@api_app.delete("/notes/{note_id}/hard", status_code=status.HTTP_204_NO_CONTENT, tags=["Notes"])
 def hard_delete_note(note_id: int, db: Session = Depends(get_db)):
     db_note = db.query(models.Note).filter(models.Note.id == note_id).first()
     if db_note is None:
@@ -512,7 +559,7 @@ def hard_delete_note(note_id: int, db: Session = Depends(get_db)):
     return
 
 
-@app.delete("/trash/empty", status_code=status.HTTP_204_NO_CONTENT, tags=["Notes"])
+@api_app.delete("/trash/empty", status_code=status.HTTP_204_NO_CONTENT, tags=["Notes"])
 def empty_trash(db: Session = Depends(get_db)):
     trashed = db.query(models.Note).filter(models.Note.is_deleted == 1).all()
     count = 0
@@ -524,7 +571,7 @@ def empty_trash(db: Session = Depends(get_db)):
     return
 
 
-@app.get("/todos", response_model=List[schemas.TodoItem], tags=["Todos"])
+@api_app.get("/todos", response_model=List[schemas.TodoItem], tags=["Todos"])
 def list_todos(note_id: Optional[int] = None, checked: Optional[bool] = None, db: Session = Depends(get_db)):
     q = db.query(models.TodoItem)
     if note_id is not None:
@@ -535,7 +582,7 @@ def list_todos(note_id: Optional[int] = None, checked: Optional[bool] = None, db
     return items
 
 
-@app.post("/todos", response_model=schemas.TodoItem, tags=["Todos"])
+@api_app.post("/todos", response_model=schemas.TodoItem, tags=["Todos"])
 def create_todo(payload: schemas.TodoItemCreate, db: Session = Depends(get_db)):
     note_id = payload.note_id
     if note_id is not None:
@@ -563,7 +610,7 @@ def create_todo(payload: schemas.TodoItemCreate, db: Session = Depends(get_db)):
     return item
 
 
-@app.put("/todos/{todo_id}", response_model=schemas.TodoItem, tags=["Todos"])
+@api_app.put("/todos/{todo_id}", response_model=schemas.TodoItem, tags=["Todos"])
 def update_todo(todo_id: int, payload: schemas.TodoItemUpdate, db: Session = Depends(get_db)):
     item = db.query(models.TodoItem).filter(models.TodoItem.id == todo_id).first()
     if item is None:
@@ -594,7 +641,7 @@ def update_todo(todo_id: int, payload: schemas.TodoItemUpdate, db: Session = Dep
     return item
 
 
-@app.delete("/todos/{todo_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Todos"])
+@api_app.delete("/todos/{todo_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Todos"])
 def delete_todo(todo_id: int, db: Session = Depends(get_db)):
     item = db.query(models.TodoItem).filter(models.TodoItem.id == todo_id).first()
     if item is None:
@@ -605,7 +652,7 @@ def delete_todo(todo_id: int, db: Session = Depends(get_db)):
     write_op_log(db, "todo", todo_id, "delete", detail=text_val)
     return
 
-@app.get("/search", response_model=List[schemas.SearchResult], tags=["Search"])
+@api_app.get("/search", response_model=List[schemas.SearchResult], tags=["Search"])
 def search_notes(query: str, db: Session = Depends(get_db)):
     q = (query or "").strip()
     if not q:
@@ -689,14 +736,14 @@ def search_notes(query: str, db: Session = Depends(get_db)):
     return results[:50]
 
 
-@app.get("/logs", response_model=List[schemas.OperationLog], tags=["Logs"])
+@api_app.get("/logs", response_model=List[schemas.OperationLog], tags=["Logs"])
 def list_logs(limit: int = 200, db: Session = Depends(get_db)):
     safe_limit = max(1, min(limit, 2000))
     logs = db.query(models.OperationLog).order_by(models.OperationLog.id.desc()).limit(safe_limit).all()
     return logs
 
 
-@app.post("/client-logs", tags=["Logs"])
+@api_app.post("/client-logs", tags=["Logs"])
 def create_client_log(payload: dict, db: Session = Depends(get_db)):
     message = payload.get("message")
     stack = payload.get("stack")
@@ -707,6 +754,6 @@ def create_client_log(payload: dict, db: Session = Depends(get_db)):
     logger.error("前端错误上报 %s", detail)
     return {"ok": True}
 
-@app.get("/", tags=["Root"])
+@api_app.get("/", tags=["Root"])
 async def read_root():
     return {"message": "Welcome to Python Notes App Backend!"}

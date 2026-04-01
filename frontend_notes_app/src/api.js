@@ -7,9 +7,9 @@ const resolveApiBaseUrl = () => {
   if (process.env.NODE_ENV === 'development') {
     if (typeof window !== 'undefined' && window.location) {
       const host = window.location.hostname;
-      if (host && host !== 'localhost' && host !== '127.0.0.1') return `http://${host}:8000`;
+      if (host && host !== 'localhost' && host !== '127.0.0.1') return `http://${host}:8000/api`;
     }
-    return 'http://localhost:8000';
+    return 'http://localhost:8000/api';
   }
 
   if (typeof window !== 'undefined' && window.location) {
