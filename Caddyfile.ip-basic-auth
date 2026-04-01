@@ -1,0 +1,13 @@
+:80 {
+  basicauth /* {
+    {$NOTES_APP_USER} {$NOTES_APP_PASSWORD_HASH}
+  }
+
+  handle_path /api/* {
+    reverse_proxy backend:8000
+  }
+
+  handle {
+    reverse_proxy web:80
+  }
+}

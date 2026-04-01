@@ -1,0 +1,16 @@
+.git
+.github
+.trae
+
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+
+frontend_notes_app/node_modules
+frontend_notes_app/build
+
+backend_notes_app/notes.db
+*.db

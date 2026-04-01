@@ -1,0 +1,42 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend_notes_app/Dockerfile
+    environment:
+      NOTES_APP_DB_PATH: /data/notes.db
+      NOTES_APP_ALLOW_ORIGIN_REGEX: ${NOTES_APP_ALLOW_ORIGIN_REGEX-}
+    volumes:
+      - notes_data:/data
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: frontend_notes_app/Dockerfile
+      args:
+        REACT_APP_API_BASE_URL: /api
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2.8-alpine
+    environment:
+      NOTES_APP_DOMAIN: ${NOTES_APP_DOMAIN-localhost}
+      NOTES_APP_USER: ${NOTES_APP_USER-}
+      NOTES_APP_PASSWORD_HASH: ${NOTES_APP_PASSWORD_HASH-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ${CADDYFILE_PATH-./Caddyfile}:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+      - web
+    restart: unless-stopped
+
+volumes:
+  notes_data:
+  caddy_data:
+  caddy_config:
